@@ -232,13 +232,14 @@ client.login(environmentVars.token).then(async () => {
                     let coolString = "Attending:\n"
 
                     if (data.attending.length > 0)
-                        await data.attending.forEach(async userId => {
-                            const user = await client.users.fetch(userId)
-                            if (user !== undefined)
+                        for (const userId in data.attending) {
+                            try {
+                                const user = await client.users.fetch(userId)
                                 coolString += `> ${user.username}\n`
-                            else
+                            } catch {
                                 coolString += `> ???\n`
-                        })
+                            }
+                        }
                     else
                         coolString += "> none :(\n"
 
