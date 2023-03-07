@@ -232,13 +232,13 @@ client.login(environmentVars.token).then(async () => {
                     let coolString = "Attending:\n"
 
                     if (data.attending.length > 0)
-                        for (const userId in data.attending) {
-                            try {
-                                const user = await client.users.fetch(userId)
+                        for (const userId of data.attending) {
+                            await client.users.fetch(userId).then(user => {
                                 coolString += `> ${user.username}\n`
-                            } catch {
+                            }).catch(thing => {
+                                console.warn(thing)
                                 coolString += `> ???\n`
-                            }
+                            })
                         }
                     else
                         coolString += "> none :(\n"
@@ -246,26 +246,28 @@ client.login(environmentVars.token).then(async () => {
                     coolString += "\nCannot attend:\n"
 
                     if (data.cannot.length > 0)
-                        data.cannot.forEach(userId => {
-                            const user = client.users.cache.get(userId)
-                            if (user !== undefined)
+                        for (const userId of data.cannot) {
+                            await client.users.fetch(userId).then(user => {
                                 coolString += `> ${user.username}\n`
-                            else
+                            }).catch(thing => {
+                                console.warn(thing)
                                 coolString += `> ???\n`
-                        })
+                            })
+                        }
                     else
                         coolString += "> none\n"
 
                     coolString += "\nDeciding:\n"
 
                     if (data.maybe.length > 0)
-                        data.maybe.forEach(userId => {
-                            const user = client.users.cache.get(userId)
-                            if (user !== undefined)
+                        for (const userId of data.maybe) {
+                            await client.users.fetch(userId).then(user => {
                                 coolString += `> ${user.username}\n`
-                            else
+                            }).catch(thing => {
+                                console.warn(thing)
                                 coolString += `> ???\n`
-                        })
+                            })
+                        }
                     else
                         coolString += "> none\n"
 
