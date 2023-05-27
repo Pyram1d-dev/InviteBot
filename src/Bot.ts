@@ -1,17 +1,22 @@
-import { Client, SlashCommandBuilder, ButtonComponent, Interaction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, APIButtonComponent, TextChannel } from "discord.js"
+import { Client, SlashCommandBuilder, ButtonComponent, Interaction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, APIButtonComponent, TextChannel, Message } from "discord.js"
 import { CronJob } from "cron"
 import { resolve } from "path"
 import environmentVars from "./data/vars.json"
 import config from "./data/config.json"
 import fs from "fs"
+import { DateObjectUnits, DateTime } from "luxon"
 
 interface DialogData {
+    guildId: string,
+    channelId: string,
+    poster: string,
     title: string,
     attending: Array<string>,
     cannot: Array<string>,
     maybe: Array<string>,
-    endDate: number[],
     cooldowns: Map<string, number>,
+    locked: boolean,
+    endDate?: DateObjectUnits,
     cron?: CronJob
 }
 
@@ -32,7 +37,11 @@ const inviteCmd = new SlashCommandBuilder()
     .setName("makeinvite")
     .setDescription("Create an invitation message with buttons that tracks people who can attend your event.")
     .addStringOption(option => option.setName('title').setDescription('The title of the event').setRequired(true))
-    .addStringOption(option => option.setName('enddate').setDescription('When voting is no longer possible (mm/dd/yyyy hh:mm:ss)').setRequired(true))
+    .addStringOption(option => option.setName('enddate').setDescription('What date voting is no longer possible (mm/dd/yyyy)').setRequired(false))
+    .addStringOption(option => option.setName('endtime').setDescription('What time voting is no longer possible in 24h time (hh:mm:ss)').setRequired(false))
+    .addStringOption(option => option.setName('timezone').setDescription('What timezone to base end dates off of').setRequired(false).setAutocomplete(true))
+    .addBooleanOption(option => option.setName('locked').setDescription('Whether or not only you can check the responses').setRequired(false))
+    .addRoleOption(option => option.setName('role').setDescription('The role to ping when the invite is created').setRequired(false))
 
 let checkCmd: any
 
@@ -41,12 +50,12 @@ async function setCheckCmd() {
         .setName("checkattending")
         .setDescription("Check who is attending a specific invite.")
         .addStringOption(option => {
-            option.setName('messageid').setDescription('The ID of the invite message').setRequired(true)
-            if (partyData.size > 0) {
-                const bruh = new Array<{ name: string, value: string }>()
-                partyData.forEach((value, key) => bruh.push({name: value.title, value: key}))
-                option.addChoices(...bruh)
-            }
+            option.setName('messageid').setDescription('The ID of the invite message').setRequired(true).setAutocomplete(true)
+            // if (partyData.size > 0) {
+            //     const bruh = new Array<{ name: string, value: string }>()
+            //     partyData.forEach((value, key) => bruh.push({name: value.title, value: key}))
+            //     option.addChoices(...bruh)
+            // }
             return option
         })
     await client.application?.commands.set([inviteCmd, checkCmd]).then(() => console.log("Commands reloaded."))
@@ -72,13 +81,13 @@ function flushData() {
         corData.cron = smh.get(key)
     }
     console.log(`Flushing`, partyData)
-    setCheckCmd();
+    //setCheckCmd();
 }
 
 function addUserToList(id: string, userId: string, attending: string) {
     const partyDialog = partyData.get(id) as DialogData
     partyDialog.cooldowns.set(userId, Date.now() / 1000)
-    // I know how bad this looks. It's fucking 2:30 AM, shut your whore mouth.
+    // I know how bad this looks. It's 2:30 AM, shut up.
     switch (attending) {
         case "attending":
             if (partyDialog.maybe.includes(userId))
@@ -130,35 +139,42 @@ const row = new ActionRowBuilder()
 const client = new Client({
     intents: ['Guilds', 'GuildMessages', 'GuildMessageReactions', 'GuildEmojisAndStickers', 'GuildMembers']
 })
-function createCronJob(msgId: string, endDate: number[]) {
-    const endTime = new Date(...(endDate as []))
-    const job = new CronJob(endTime, async () => {
-        const ch = await client.channels.fetch(environmentVars.channel)
-        if (ch) {
-            const msg = await (ch as TextChannel).messages.fetch(msgId)
-            if (msg) {
-                const data = partyData.get(msgId) as DialogData
-                console.log(msgId, data)
-                const embed = new EmbedBuilder()
-                    .setColor(0x0099FF)
-                    .setTitle(data.title)
-                    .setDescription(`The invite has ended. I look forward to seeing everyone who responded!`)
-                    .setFooter({ text: `Attending: ${data.attending.length}\nCan't attend: ${data.cannot.length}\nDeciding: ${data.maybe.length}` })
-    
-                msg.edit({ embeds: [embed], components: [] });
+function createCronJob(msgId: string, guildId: string, channelId: string, endDate: DateObjectUnits) {
+    const endTime = DateTime.fromObject(endDate, {zone: 'utc'}).setZone('local').toJSDate()
+    try {
+        const job = new CronJob(endTime, async () => {
+            const g = await client.guilds.fetch(guildId);
+            const ch = await g.channels.fetch(channelId);
+            if (ch) {
+                try {
+                    const msg = await (ch as TextChannel).messages.fetch(msgId)
+                    if (msg) {
+                        const data = partyData.get(msgId) as DialogData
+                        console.log(msgId, data)
+                        const embed = new EmbedBuilder()
+                            .setColor(0x0099FF)
+                            .setTitle(data.title)
+                            .setDescription(`The invite has ended. I look forward to seeing everyone who responded!`)
+                            .setFooter({ text: `Attending: ${data.attending.length}\nCan't attend: ${data.cannot.length}\nDeciding: ${data.maybe.length}` })
+            
+                        msg.edit({ embeds: [embed], components: [] });
+                    }
+                } catch {/* don't do shit */}
             }
-        }
-    })
-    job.start()
-    return job
+        })
+        job.start();
+        return job;
+    } catch {
+        return undefined;
+    }
 }
 client.login(environmentVars.token).then(async () => {
     partyData.forEach((data, key) => {
         data.cooldowns = new Map(Object.entries(data.cooldowns))
-        const now = Date.now()
-        const endTime = new Date(...(data.endDate as []))
-        if (now < endTime.getTime()) {
-            data.cron = createCronJob(key, data.endDate)
+        if (data.endDate != undefined) {
+            const endTime = DateTime.fromObject(data.endDate, {zone: 'utc'}).toJSDate();
+            if (Date.now() < endTime.getTime())
+                data.cron = createCronJob(key, data.guildId, data.channelId, data.endDate)
         }
     })
     setCheckCmd()
@@ -177,45 +193,114 @@ client.login(environmentVars.token).then(async () => {
             }
         })
     })
+    const timezoneAliases = new Map<string, string>([
+        ['CST', 'America/Chicago'],
+        ['EST', 'America/New_York'],
+        ['PST', 'America/Los_Angeles'],
+        ['MST', 'America/Denver'],
+        ['GMT', 'Europe/London'],
+        ['UTC', 'utc']
+    ])
     client.on("interactionCreate", async (interaction: Interaction) => {
-        if (interaction.isCommand() || interaction.isContextMenuCommand()) {
-            if (interaction.user.id !== config.myId) {
-                interaction.reply({content: "Nah bitch only the birthday boy can use this", ephemeral: true})
-                return
+        if (interaction.isAutocomplete()) {
+            switch (interaction.commandName) {
+                case "checkattending": {
+                    const invites = new Array<{ name: string, value: string }>()
+                    partyData.forEach((value, key) => {
+                        if (value.guildId == interaction.guildId) {
+                            const text = interaction.options.getFocused()
+                            if (text != '' && !value.title.toLowerCase().includes(text.toLowerCase()))
+                                return;
+                            invites.push({ name: value.title, value: key })
+                        }
+                    })
+                    interaction.respond(invites);
+                    break;
+                }
+                case "makeinvite": {
+                    const results = new Array<{ name: string, value: string }>()
+                    timezoneAliases.forEach((value, key) => {
+                        const text = interaction.options.getFocused()
+                        if (text != '' && !key.toLowerCase().includes(text.toLowerCase()))
+                            return;
+                        results.push({ name: key, value: value });
+                    })
+                    interaction.respond(results);
+                    break;
+                }
             }
+        } else if (interaction.isCommand() || interaction.isContextMenuCommand()) {
             switch (interaction.commandName) {
                 case "makeinvite": {
                     await interaction.deferReply()
                     const title = interaction.options.get('title')?.value as string
-                    const enddateoption = interaction.options.get('enddate')?.value as string
-                    const regMoment = /[0-9]{2}\/[0-9]{2}\/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}/
+                    const enddateoption = interaction.options.get('enddate')?.value as string | undefined
+                    const endtimeoption = interaction.options.get('endtime')?.value as string | undefined
+                    const timezoneoption = interaction.options.get('timezone')?.value as string | undefined
+                    const rolepingoption = interaction.options.get('role')?.value as string | undefined
+                    const lockedoption = interaction.options.get('locked')?.value as boolean | undefined
+                    let endDate: DateObjectUnits | undefined = undefined;
+                    const tz = timezoneoption != undefined ? timezoneoption : 'utc'
+                    if (enddateoption != undefined || endtimeoption != undefined) {
+                        const dateReg = /[0-9]{2}\/[0-9]{2}\/[0-9]{4}/
+                        const timeReg = /[0-9]{2}:[0-9]{2}:[0-9]{2}/
 
-                    if (!regMoment.test(enddateoption)) {
-                        interaction.followUp({ content: "Date invalid, please match format.", ephemeral: true })
-                        return
+                        if (enddateoption && !dateReg.test(enddateoption)) {
+                            interaction.followUp({ content: "Date invalid, please match format.", ephemeral: true })
+                            return
+                        }
+
+                        if (endtimeoption && !timeReg.test(endtimeoption)) {
+                            interaction.followUp({ content: "Time invalid, please match format.", ephemeral: true })
+                            return
+                        }
+
+                        
+                        const curDate = DateTime.now().setZone(tz);
+                        let [month, day, year] = enddateoption ? enddateoption.split('/').map(val => parseInt(val)) : [curDate.month, curDate.day, curDate.year];
+                        let [hours, minutes, seconds] = endtimeoption ? endtimeoption.split(':').map(val => parseInt(val)) : [0, 0, 0];
+
+                        const adjDate = DateTime.fromObject({
+                            year: year,
+                            month: month,
+                            day: day,
+                            hour: hours,
+                            minute: minutes,
+                            second: seconds,
+                        }, {zone: tz}).setZone('utc')
+                        console.log(`${adjDate.toString()}, ${curDate.toString()}`);
+                        if (curDate.toUTC().toMillis() > adjDate.toMillis()) {
+                            interaction.followUp({ content: "Date cannot be in the past. Did you forget to set your time zone?", ephemeral: true });
+                            return;
+                        }
+
+                        endDate = adjDate.toObject();
+                        console.log(endDate)
                     }
 
-                    const [dateComponents, timeComponents] = enddateoption.split(' ')
-                    const [month, day, year] = dateComponents.split('/')
-                    const [hours, minutes, seconds] = timeComponents.split(':')
-
-                    const endDate = [+year, +month - 1, +day, +hours, +minutes, +seconds]
-                    console.log(endDate)
                     const embed = new EmbedBuilder()
                         .setColor(0x0099FF)
                         .setTitle(title)
-                        .setDescription(`RSVP! Please respond as soon as possible.\nInvite ends <t:${new Date(...(endDate as [])).getTime() / 1000}:R>`)
+                        .setDescription(`RSVP! Please respond as soon as possible.${
+                            endDate != undefined ? `\nInvite ends <t:${DateTime.fromObject(endDate as DateObjectUnits, {zone: 'utc'}).toMillis() / 1000}:R>` : ''
+                        }`)
                         .setFooter({ text: `No responses...` })
         
-                    interaction.followUp({ embeds: [embed], components: [row as never] }).then(message => {
+                    interaction.followUp({ content: rolepingoption != undefined ? `<@&${rolepingoption}>` : undefined, 
+                        embeds: [embed], 
+                        components: [row as never] }).then(message => {
                         partyData.set(message.id, {
+                            guildId: message.guildId as string,
+                            channelId: message.channelId,
+                            poster: interaction.user.id,
                             title: title,
                             attending: [],
                             cannot: [],
                             maybe: [],
                             endDate: endDate,
+                            locked: lockedoption != undefined ? lockedoption : false,
                             cooldowns: new Map<string, number>(),
-                            cron: createCronJob(message.id, endDate)
+                            cron: endDate != undefined ? createCronJob(message.id, message.guildId as string, message.channelId, endDate) : undefined
                         });
                         flushData();
                     })
@@ -229,47 +314,51 @@ client.login(environmentVars.token).then(async () => {
                         break;
                     }
                     let data = partyData.get(id) as DialogData
+                    if (data.locked && data.poster != interaction.user.id) {
+                        interaction.followUp({ content: `Only <@${data.poster}> can view the results!`, ephemeral: true })
+                        break;
+                    }
                     let coolString = "Attending:\n"
 
                     if (data.attending.length > 0)
                         for (const userId of data.attending) {
                             await client.users.fetch(userId).then(user => {
-                                coolString += `> ${user.username}\n`
+                                coolString += `- <@${user.id}>\n`
                             }).catch(thing => {
                                 console.warn(thing)
-                                coolString += `> ???\n`
+                                coolString += `- ???\n`
                             })
                         }
                     else
-                        coolString += "> none :(\n"
+                        coolString += "- none :(\n"
 
                     coolString += "\nCannot attend:\n"
 
                     if (data.cannot.length > 0)
                         for (const userId of data.cannot) {
                             await client.users.fetch(userId).then(user => {
-                                coolString += `> ${user.username}\n`
+                                coolString += `- <@${user.id}>\n`
                             }).catch(thing => {
                                 console.warn(thing)
-                                coolString += `> ???\n`
+                                coolString += `- ???\n`
                             })
                         }
                     else
-                        coolString += "> none\n"
+                        coolString += "- none\n"
 
                     coolString += "\nDeciding:\n"
 
                     if (data.maybe.length > 0)
                         for (const userId of data.maybe) {
                             await client.users.fetch(userId).then(user => {
-                                coolString += `> ${user.username}\n`
+                                coolString += `- <@${user.id}>\n`
                             }).catch(thing => {
                                 console.warn(thing)
-                                coolString += `> ???\n`
+                                coolString += `- ???\n`
                             })
                         }
                     else
-                        coolString += "> none\n"
+                        coolString += "- none\n"
 
                     //coolString = coolString.trim() + '```'
                     interaction.followUp({ content: coolString.trim(), ephemeral: true })
@@ -282,6 +371,10 @@ client.login(environmentVars.token).then(async () => {
                 custom_id: string
             }
             const partyDialog = partyData.get(interaction.message.id) as DialogData
+            if (partyDialog == undefined) {
+                interaction.reply({ content: "Uhhh, something went wrong.", ephemeral: true })
+                return;
+            }
             const userId = interaction.user.id
             if (partyDialog.cooldowns.get(userId) != undefined)
             {
@@ -308,9 +401,12 @@ client.login(environmentVars.token).then(async () => {
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle(partyDialog.title)
-                .setDescription(`RSVP! Please respond as soon as possible.\nInvite ends <t:${new Date(...(partyDialog.endDate as [])).getTime() / 1000}:R>`)
+                .setDescription(`RSVP! Please respond as soon as possible.${
+                    partyDialog.endDate != undefined ? `\nInvite ends <t:${DateTime.fromObject(partyDialog.endDate as DateObjectUnits, {zone: 'utc'}).toMillis() / 1000}:R>` : ''
+                }`)
                 .setFooter({ text: `Attending: ${partyDialog.attending.length}\nCan't attend: ${partyDialog.cannot.length}\nDeciding: ${partyDialog.maybe.length}` })
 
+            console.log(DateTime.fromObject(partyDialog.endDate as DateObjectUnits, {zone: 'utc'}));
             interaction.message.edit({ embeds: [embed], components: [row as never] });
             await interaction.reply({ content: `You are now ${penis()}`, ephemeral: true });
         }
