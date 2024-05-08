@@ -147,7 +147,7 @@ function createCronJob(msgId: string, guildId: string, channelId: string, endDat
             const ch = await g.channels.fetch(channelId);
             if (ch) {
                 try {
-                    const msg = await (ch as TextChannel).messages.fetch(msgId)
+                    const msg = await (ch as TextChannel).messages.fetch(msgId);
                     if (msg) {
                         const data = partyData.get(msgId) as DialogData
                         console.log(msgId, data)
