@@ -1,4 +1,4 @@
-import { Client, SlashCommandBuilder, ButtonComponent, Interaction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, APIButtonComponent, TextChannel, Message } from "discord.js"
+import { Client, SlashCommandBuilder, ButtonComponent, Interaction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, APIButtonComponent, TextChannel, Message, MessageMentionOptions } from "discord.js"
 import { CronJob } from "cron"
 import { resolve } from "path"
 import environmentVars from "./data/vars.json"
@@ -23,15 +23,16 @@ interface DialogData {
 const partyJsonPath = "./data/dialogs.json"
 const fsPath = resolve(__dirname, partyJsonPath)
 
-let partyData: Map<string, DialogData> = new Map<string, DialogData>()
+const partyData: Map<string, DialogData> = new Map<string, DialogData>()
 if (!fs.existsSync(fsPath))
     fs.writeFileSync(fsPath, "{}", 'utf-8')
+
+const messageCache = new Map<string, Message>()
 
 const temp = require(partyJsonPath)
 Object.keys(temp).forEach(key => {
     partyData.set(key, temp[key])
 })
-console.log(partyData)
 
 const inviteCmd = new SlashCommandBuilder()
     .setName("makeinvite")
@@ -136,31 +137,39 @@ const row = new ActionRowBuilder()
             .setStyle(ButtonStyle.Secondary)
     )
 
+async function fetchMessage(guildId: string, channelId: string, messageId: string): Promise<Message | undefined> {
+    const g = await client.guilds.fetch(guildId);
+    const ch = await g?.channels.fetch(channelId);
+    if (ch) {
+        try {
+            return await (ch as TextChannel).messages.fetch(messageId);
+        } catch {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
 const client = new Client({
-    intents: ['Guilds', 'GuildMessages', 'GuildMessageReactions', 'GuildEmojisAndStickers', 'GuildMembers']
+    intents: ['Guilds', 'GuildMessages', 'GuildMessageReactions', 'GuildEmojisAndStickers', 'GuildMembers', 'MessageContent']
 })
 function createCronJob(msgId: string, guildId: string, channelId: string, endDate: DateObjectUnits) {
     const endTime = DateTime.fromObject(endDate, {zone: 'utc'}).setZone('local').toJSDate()
     try {
         const job = new CronJob(endTime, async () => {
-            const g = await client.guilds.fetch(guildId);
-            const ch = await g.channels.fetch(channelId);
-            if (ch) {
-                try {
-                    const msg = await (ch as TextChannel).messages.fetch(msgId);
-                    if (msg) {
-                        const data = partyData.get(msgId) as DialogData
-                        console.log(msgId, data)
-                        const embed = new EmbedBuilder()
-                            .setColor(0x0099FF)
-                            .setTitle(data.title)
-                            .setDescription(`The invite has ended. I look forward to seeing everyone who responded!`)
-                            .setFooter({ text: `Attending: ${data.attending.length}\nCan't attend: ${data.cannot.length}\nDeciding: ${data.maybe.length}` })
-            
-                        msg.edit({ embeds: [embed], components: [] });
-                    }
-                } catch {/* don't do shit */}
-            }
+            try {
+                const msg = messageCache.get(msgId) ?? await fetchMessage(guildId, channelId, msgId);
+                if (msg) {
+                    const data = partyData.get(msgId) as DialogData
+                    const embed = new EmbedBuilder()
+                        .setColor(0x0099FF)
+                        .setTitle(data.title)
+                        .setDescription(`The invite has ended. I look forward to seeing everyone who responded!`)
+                        .setFooter({ text: `Attending: ${data.attending.length}\nCan't attend: ${data.cannot.length}\nDeciding: ${data.maybe.length}` })
+        
+                    msg.edit({ embeds: [embed], components: [] });
+                }
+            } catch {/* don't do shit */}
         })
         job.start();
         return job;
@@ -169,14 +178,32 @@ function createCronJob(msgId: string, guildId: string, channelId: string, endDat
     }
 }
 client.login(environmentVars.token).then(async () => {
-    partyData.forEach((data, key) => {
+    const missingMessages: string[] = [];
+    for (const [key, data] of partyData) {
+        const msg = await fetchMessage(data.guildId, data.channelId, key)
+        if (!msg) {
+            missingMessages.push(key);
+            continue;
+        }
+        messageCache.set(key, msg);
         data.cooldowns = new Map(Object.entries(data.cooldowns))
         if (data.endDate != undefined) {
             const endTime = DateTime.fromObject(data.endDate, {zone: 'utc'}).toJSDate();
             if (Date.now() < endTime.getTime())
                 data.cron = createCronJob(key, data.guildId, data.channelId, data.endDate)
         }
-    })
+    }
+    console.log(`Messages found: ${messageCache.size}\nMessages missing: ${missingMessages.length}`);
+    if (missingMessages.length > 0) {
+        missingMessages.forEach((msgId) => {
+            console.log(`Removing ${partyData.get(msgId)?.title}`);
+            if (partyData.has(msgId)) {
+                partyData.get(msgId)?.cron?.stop()
+                partyData.delete(msgId)
+            }
+        })
+        flushData();
+    }
     setCheckCmd()
     console.log(client.application?.commands.cache)
     client.on('messageDelete', async (message) => {
@@ -286,7 +313,14 @@ client.login(environmentVars.token).then(async () => {
                         }`)
                         .setFooter({ text: `No responses...` })
         
-                    interaction.followUp({ content: rolepingoption != undefined ? `<@&${rolepingoption}>` : undefined, 
+                    console.log(`Role to ping: ${rolepingoption}`);
+                    let allowedMentions = { roles: [rolepingoption] } as MessageMentionOptions;
+                    let pingMsg = `<@&${rolepingoption}>`;
+                    if (rolepingoption === interaction.guild?.id) {
+                        allowedMentions = { parse: ["everyone"] };
+                        pingMsg = "@everyone";
+                    }
+                    interaction.followUp({ allowedMentions: allowedMentions, content: rolepingoption !== undefined ? pingMsg : undefined, 
                         embeds: [embed], 
                         components: [row as never] }).then(message => {
                         partyData.set(message.id, {
@@ -302,6 +336,7 @@ client.login(environmentVars.token).then(async () => {
                             cooldowns: new Map<string, number>(),
                             cron: endDate != undefined ? createCronJob(message.id, message.guildId as string, message.channelId, endDate) : undefined
                         });
+                        messageCache.set(message.id, message);
                         flushData();
                     })
                     break;
