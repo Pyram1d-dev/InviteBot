@@ -2,9 +2,11 @@
   "dependencies": {
     "@types/cron": "^2.0.0",
     "@types/luxon": "^3.3.0",
-    "cron": "^2.2.0",
+    "cron": "^2.4.4",
     "discord.js": "^14.11.0",
-    "luxon": "^3.3.0"
+    "fs": "^0.0.1-security",
+    "luxon": "^3.5.0",
+    "path": "^0.12.7"
   },
   "devDependencies": {
     "@types/node": "^20.2.5",
